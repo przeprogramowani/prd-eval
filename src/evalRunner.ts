@@ -34,15 +34,14 @@ type CombinedRow = {
 
 async function runPromptfoo() {
   const evalRecord = await promptfoo.evaluate(config as any);
-  const results = await evalRecord.getResults();
   const runId = evalRecord.id ?? randomUUID();
   const timestamp = evalRecord.createdAt
     ? new Date(evalRecord.createdAt).toISOString()
     : new Date().toISOString();
-  // getResults() returns an object with a nested 'results' array
-  const resultsArray = Array.isArray(results)
-    ? results
-    : (results as any)?.results ?? [];
+  // Access results directly from evalRecord without database query
+  const resultsArray = Array.isArray(evalRecord.results)
+    ? evalRecord.results
+    : (evalRecord as any)?.results ?? [];
   return {
     runId,
     timestamp,
