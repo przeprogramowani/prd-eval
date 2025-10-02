@@ -14,6 +14,7 @@ loadEnv();
 const REPO_ROOT = path.resolve(__dirname, "..");
 const RESULTS_DIR = path.join(REPO_ROOT, "dist", "results");
 const CSV_PATH = path.join(RESULTS_DIR, "score-history.csv");
+const LITE_JSON_PATH = path.join(RESULTS_DIR, "latest.lite.json");
 
 const CRITERIA = [
   "problemDefinition",
@@ -44,6 +45,10 @@ interface JudgeOutput {
   model: string;
   scores: Record<string, ScoreEntry>;
   judge?: string;
+  file?: string;
+  totalScore?: number;
+  verdict?: string;
+  keyFollowUp?: string;
 }
 
 interface JudgeModelPair {
@@ -65,16 +70,47 @@ interface EvaluationResults {
 
 type ProviderIdentifier = string | {id: string; label?: string};
 
+interface LiteJudgeModelResult {
+  file?: string;
+  scores: Partial<Record<Criterion, number>>;
+  totalScore?: number;
+  verdict?: string;
+  keyFollowUp?: string;
+}
+
+interface LiteResults {
+  runId: string;
+  timestamp: string;
+  judges: Record<string, Record<string, LiteJudgeModelResult>>;
+}
+
 // ============================================================================
 // Utility Functions
 // ============================================================================
 
 /**
- * Strips markdown code fences from JSON output.
+ * Strips markdown code fences and thinking blocks from JSON output.
  * Handles formats like ```json\n...\n``` or ```\n...\n```
+ * Also removes "Thinking:" blocks that some models emit despite instructions
  */
 function stripMarkdownFences(text: string): string {
-  return text.replace(/^```(?:json)?\s*\n?/i, "").replace(/\n?```\s*$/i, "");
+  let cleaned = text
+    .replace(/^```(?:json)?\s*\n?/i, "")
+    .replace(/\n?```\s*$/i, "");
+
+  // Find the first "{" which should be the start of JSON
+  const jsonStart = cleaned.indexOf("{");
+  if (jsonStart > 0) {
+    cleaned = cleaned.substring(jsonStart);
+  }
+
+  // Find the last "}" which should be the end of JSON
+  const jsonEnd = cleaned.lastIndexOf("}");
+  if (jsonEnd > 0 && jsonEnd < cleaned.length - 1) {
+    cleaned = cleaned.substring(0, jsonEnd + 1);
+  }
+
+  return cleaned.trim();
 }
 
 /**
@@ -252,6 +288,71 @@ function writeCsvRow(row: CsvRow, pairs: JudgeModelPair[]): void {
   appendFileSync(CSV_PATH, `${orderedValues.join(",")}\n`);
 }
 
+function buildLiteResults(
+  runId: string,
+  timestamp: string,
+  entries: JudgeOutput[]
+): LiteResults {
+  const lite: LiteResults = {
+    runId,
+    timestamp,
+    judges: {},
+  };
+
+  for (const entry of entries) {
+    const judge = entry.judge ?? "unknown";
+
+    if (!lite.judges[judge]) {
+      lite.judges[judge] = {};
+    }
+
+    const scores: Partial<Record<Criterion, number>> = {};
+    for (const criterion of CRITERIA) {
+      const scoreValue = entry.scores[criterion]?.score;
+      if (typeof scoreValue === "number" && !Number.isNaN(scoreValue)) {
+        scores[criterion] = scoreValue;
+      }
+    }
+
+    const liteEntry: LiteJudgeModelResult = {
+      scores,
+    };
+
+    if (entry.file !== undefined) {
+      liteEntry.file = entry.file;
+    }
+
+    if (
+      typeof entry.totalScore === "number" &&
+      !Number.isNaN(entry.totalScore)
+    ) {
+      liteEntry.totalScore = entry.totalScore;
+    }
+
+    if (entry.verdict !== undefined) {
+      liteEntry.verdict = entry.verdict;
+    }
+
+    if (entry.keyFollowUp !== undefined) {
+      liteEntry.keyFollowUp = entry.keyFollowUp;
+    }
+
+    lite.judges[judge][entry.model] = liteEntry;
+  }
+
+  return lite;
+}
+
+function writeLiteResults(
+  runId: string,
+  timestamp: string,
+  entries: JudgeOutput[]
+): void {
+  ensureResultsDir();
+  const liteResults = buildLiteResults(runId, timestamp, entries);
+  writeFileSync(LITE_JSON_PATH, `${JSON.stringify(liteResults, null, 2)}\n`);
+}
+
 // ============================================================================
 // Main Execution
 // ============================================================================
@@ -284,6 +385,9 @@ async function main(): Promise<void> {
 
   // Write to CSV
   writeCsvRow(csvRow, judgeModelPairs);
+
+  // Write lite JSON summary without raw prompt inputs
+  writeLiteResults(runId, timestamp, judgeOutputs);
 
   console.log(`✅ Logged scores to ${path.relative(REPO_ROOT, CSV_PATH)}`);
 }

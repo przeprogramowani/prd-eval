@@ -1,95 +1,90 @@
 import * as fs from "fs";
 import * as path from "path";
 
-interface ScoreRow {
-  run_id: string;
-  timestamp: string;
-  scores: Record<string, string>;
+const RESULTS_PATH = path.join(
+  __dirname,
+  "..",
+  "dist",
+  "results",
+  "latest.lite.json"
+);
+
+const CRITERIA = [
+  "problemDefinition",
+  "requirementsClarity",
+  "scopeBoundaries",
+  "userStories",
+  "measurability",
+] as const;
+
+type Criterion = (typeof CRITERIA)[number];
+
+interface LiteJudgeModelResult {
+  file?: string;
+  scores: Partial<Record<Criterion, number>>;
+  totalScore?: number;
+  verdict?: string;
+  keyFollowUp?: string;
 }
 
-function parseCSV(filePath: string): ScoreRow | null {
-  if (!fs.existsSync(filePath)) {
-    console.error("⚠️ Score history file not found");
-    return null;
-  }
-
-  const content = fs.readFileSync(filePath, "utf-8");
-  const lines = content
-    .trim()
-    .split("\n")
-    .filter((line) => line.trim());
-
-  if (lines.length < 2) {
-    console.error("⚠️ No score data found in CSV");
-    return null;
-  }
-
-  const headerLine = lines[0];
-  const lastDataLine = lines[lines.length - 1];
-
-  if (!headerLine || !lastDataLine) {
-    console.error("⚠️ Invalid CSV structure");
-    return null;
-  }
-
-  const headers = headerLine.split(",");
-  const dataValues = lastDataLine.split(",");
-
-  const scores: Record<string, string> = {};
-  for (let i = 2; i < headers.length; i++) {
-    const header = headers[i];
-    const value = dataValues[i];
-    if (header && value !== undefined) {
-      scores[header] = value;
-    }
-  }
-
-  const runId = dataValues[0];
-  const timestamp = dataValues[1];
-
-  if (!runId || !timestamp) {
-    console.error("⚠️ Missing run_id or timestamp");
-    return null;
-  }
-
-  return {
-    run_id: runId,
-    timestamp: timestamp,
-    scores,
-  };
+interface LiteResults {
+  runId: string;
+  timestamp: string;
+  judges: Record<string, Record<string, LiteJudgeModelResult>>;
 }
 
 interface VendorJudgeScores {
   [vendor: string]: {
-    [judge: string]: Record<string, string>;
+    [judge: string]: Record<string, number>;
   };
 }
 
-function groupScoresByVendorAndJudge(
-  scores: Record<string, string>
-): VendorJudgeScores {
+function parseLiteResults(filePath: string): LiteResults | null {
+  if (!fs.existsSync(filePath)) {
+    console.error("⚠️ Lite results file not found");
+    return null;
+  }
+
+  try {
+    const content = fs.readFileSync(filePath, "utf-8");
+    const parsed = JSON.parse(content) as LiteResults;
+
+    if (!parsed || typeof parsed !== "object") {
+      throw new Error("Lite results JSON malformed");
+    }
+
+    if (!parsed.runId || !parsed.timestamp || !parsed.judges) {
+      throw new Error("Lite results JSON missing required fields");
+    }
+
+    return parsed;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`⚠️ Failed to read lite results: ${message}`);
+    return null;
+  }
+}
+
+function groupScoresByVendorAndJudge(lite: LiteResults): VendorJudgeScores {
   const grouped: VendorJudgeScores = {};
 
-  for (const [key, value] of Object.entries(scores)) {
-    const parts = key.split("_");
+  for (const [judge, models] of Object.entries(lite.judges)) {
+    if (!models) continue;
 
-    // New format: judge_vendor_metric
-    if (parts.length >= 3) {
-      const judge = parts[0];
-      const vendor = parts[1];
-      const metric = parts.slice(2).join("_");
-
-      if (!judge || !vendor || !metric) {
-        continue;
-      }
-
+    for (const [vendor, data] of Object.entries(models)) {
       if (!grouped[vendor]) {
         grouped[vendor] = {};
       }
       if (!grouped[vendor][judge]) {
         grouped[vendor][judge] = {};
       }
-      grouped[vendor][judge][metric] = value;
+
+      const scores = data?.scores ?? {};
+      for (const [metric, value] of Object.entries(scores)) {
+        if (typeof value === "number" && !Number.isNaN(value)) {
+          grouped[vendor][judge][metric] = value;
+        }
+      }
     }
   }
 
@@ -103,8 +98,11 @@ function formatMetricName(metric: string): string {
     .trim();
 }
 
-function calculateAverage(scores: Record<string, string>): string {
-  const values = Object.values(scores).map(Number);
+function calculateAverage(scores: Record<string, number>): string {
+  const values = Object.values(scores);
+  if (values.length === 0) {
+    return "N/A";
+  }
   const sum = values.reduce((a, b) => a + b, 0);
   return (sum / values.length).toFixed(1);
 }
@@ -140,22 +138,24 @@ function findBestModelPerJudge(
   return bestPerJudge;
 }
 
-function formatScoreSummary(row: ScoreRow): string {
-  const groupedScores = groupScoresByVendorAndJudge(row.scores);
+function formatScoreSummary(
+  lite: LiteResults,
+  groupedScores: VendorJudgeScores
+): string {
   const vendors = Object.keys(groupedScores).sort();
 
   if (vendors.length === 0) {
     return "⚠️ No vendor scores found\n";
   }
 
-  const timestamp = new Date(row.timestamp).toLocaleString("en-US", {
+  const timestamp = new Date(lite.timestamp).toLocaleString("en-US", {
     timeZone: "UTC",
     dateStyle: "medium",
     timeStyle: "short",
   });
 
   let output = "## 📊 PRD Evaluation Scores\n\n";
-  output += `**Run ID:** \`${row.run_id}\`  \n`;
+  output += `**Run ID:** \`${lite.runId}\`  \n`;
   output += `**Timestamp:** ${timestamp} UTC\n\n`;
 
   // Extract all unique judges across all vendors
@@ -224,7 +224,7 @@ function formatScoreSummary(row: ScoreRow): string {
 
       metrics.forEach((metric) => {
         const score = judgeScores[metric];
-        output += `${score ?? "N/A"} | `;
+        output += `${score !== undefined ? score : "N/A"} | `;
       });
 
       const avg = calculateAverage(judgeScores);
@@ -260,22 +260,15 @@ function formatBestModelPerJudge(groupedScores: VendorJudgeScores): string {
   return output;
 }
 
-function main() {
-  const resultsPath = path.join(
-    __dirname,
-    "..",
-    "dist",
-    "results",
-    "score-history.csv"
-  );
-  const scoreRow = parseCSV(resultsPath);
+function main(): void {
+  const liteResults = parseLiteResults(RESULTS_PATH);
 
-  if (!scoreRow) {
+  if (!liteResults) {
     process.exit(1);
   }
 
-  const groupedScores = groupScoresByVendorAndJudge(scoreRow.scores);
-  const summary = formatScoreSummary(scoreRow);
+  const groupedScores = groupScoresByVendorAndJudge(liteResults);
+  const summary = formatScoreSummary(liteResults, groupedScores);
   const bestModelSummary = formatBestModelPerJudge(groupedScores);
 
   // Check if running in GitHub Actions

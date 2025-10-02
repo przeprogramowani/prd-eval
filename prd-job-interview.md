@@ -4,6 +4,14 @@ This document provides five criteria for evaluating product requirement document
 
 ---
 
+## Response formatting checklist
+
+- Return a single JSON object that matches the schema exactly; do not add extra properties or reorder keys.
+- The first character of the response must be `{` and the last character must be `}` with no leading or trailing whitespace.
+- Never include Markdown fences, prose (for example "Thinking" or "Analysis"), or apologies.
+- If you cannot comply, return `{"error":"formatting"}` so downstream tooling can detect the failure.
+- Keep every rationale under 400 characters and cite at least one concrete reference (quote, metric, or section name).
+
 ## Criterion 1: Problem definition & user understanding
 
 ### What this measures

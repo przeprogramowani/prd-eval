@@ -65,6 +65,12 @@ Formatting rules:
 - Output MUST be valid JSON, no Markdown code fences, no additional commentary.
 - Keep rationales under 400 characters each but include at least one concrete reference (quote, metric, or section name).
 - Use {{modelName}} and {{prdPath}} to populate the "model" and "file" fields, respectively.
+- The FIRST character of your response must be "{" and the LAST character must be "}". Do not emit any leading or trailing whitespace, explanations, apologies, or reasoning text.
+- Never return thoughts such as "Thinking", "Analysis", or any text wrapped in Markdown fences. If you cannot comply, return exactly the string "{"error":"formatting"}".
+- Follow the schema exactly and do not add or remove keys.
+
+Valid response example (for illustration only; replace values with your own scores):
+{"model":"${modelDirectories[0]}","file":"/path/to/prd.md","scores":{"problemDefinition":{"score":7,"rationale":"Example"},"requirementsClarity":{"score":7,"rationale":"Example"},"scopeBoundaries":{"score":7,"rationale":"Example"},"userStories":{"score":7,"rationale":"Example"},"measurability":{"score":7,"rationale":"Example"}},"totalScore":35,"verdict":"strong","keyFollowUp":"Example"}
 
 Candidate PRD to evaluate:
 ---
@@ -92,12 +98,14 @@ const config: UnifiedConfig = {
       config: {
         model: "gpt-5",
         temperature: 0,
+        response_format: {type: "json_object"},
       },
     },
     {
       id: "anthropic:messages:claude-sonnet-4-5-20250929",
       config: {
         temperature: 0,
+        response_format: {type: "json_object"},
       },
     },
     {
@@ -105,6 +113,7 @@ const config: UnifiedConfig = {
       config: {
         temperature: 0,
         max_tokens: 4096,
+        response_format: {type: "json_object"},
       },
     },
   ],
