@@ -104,6 +104,7 @@ const config: UnifiedConfig = {
       id: "openrouter:google/gemini-2.5-pro",
       config: {
         temperature: 0,
+        max_tokens: 4096,
       },
     },
   ],

@@ -4,9 +4,7 @@
   "main": "index.js",
   "scripts": {
     "build": "tsc --project tsconfig.json",
-    "eval": "npm run build && PROMPTFOO_CACHE_ENABLED=false node dist/evalRunner.js",
-    "eval:watch": "tsc --project tsconfig.json --watch",
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "eval": "rm -rf dist/results && npm run build && PROMPTFOO_CACHE_ENABLED=false node dist/evalRunner.js",
     "display-scores": "npm run build && node dist/resultInterpreter.js"
   },
   "author": "",
