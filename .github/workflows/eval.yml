@@ -26,42 +26,9 @@ jobs:
       - name: Run evaluation
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          PROMPTFOO_CACHE_ENABLED: false
         run: npm run eval
 
       - name: Display scores summary
         if: always()
-        run: |
-          if [ -f dist/results/score-history.csv ]; then
-            echo "## 📊 PRD Evaluation Scores" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-
-            # Convert CSV to markdown table
-            awk -F',' '
-              NR==1 {
-                # Header row
-                printf "| "
-                for (i=1; i<=NF; i++) {
-                  gsub(/_/, " ", $i)
-                  printf "%s | ", $i
-                }
-                print ""
-                # Separator row
-                printf "|"
-                for (i=1; i<=NF; i++) printf " --- |"
-                print ""
-              }
-              NR>1 {
-                # Data rows
-                printf "| "
-                for (i=1; i<=NF; i++) {
-                  printf "%s | ", $i
-                }
-                print ""
-              }
-            ' dist/results/score-history.csv >> $GITHUB_STEP_SUMMARY
-
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "_Last updated: $(date -u +"%Y-%m-%d %H:%M:%S UTC")_" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "⚠️ Score history file not found" >> $GITHUB_STEP_SUMMARY
-          fi
+        run: npm run display-scores
