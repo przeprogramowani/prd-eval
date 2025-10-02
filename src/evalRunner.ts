@@ -90,12 +90,18 @@ function parseJudgeOutput(result: EvaluateResult): JudgeJson | null {
     return null;
   }
   try {
-    const parsed = JSON.parse(raw) as JudgeJson;
+    // Strip markdown code fences if present (e.g., ```json\n...\n```)
+    const cleanedJson = raw
+      .replace(/^```(?:json)?\s*\n?/i, "")
+      .replace(/\n?```\s*$/i, "");
+    const parsed = JSON.parse(cleanedJson) as JudgeJson;
     if (!parsed.model || !parsed.scores) {
       return null;
     }
-    // Extract provider/judge information
-    const providerId = (result.provider as any)?.id || "";
+    // Extract provider/judge information - handle both string and object formats
+    const provider = result.provider as any;
+    const providerId =
+      typeof provider === "string" ? provider : provider?.id || "";
     parsed.judge = normalizeJudgeName(providerId);
     return parsed;
   } catch {

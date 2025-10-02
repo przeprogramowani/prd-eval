@@ -15,10 +15,12 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "20"
-          cache: "npm"
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Clean previous results
+        run: rm -rf dist/results
 
       - name: Build verification
         run: npm run build
@@ -28,6 +30,7 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           PROMPTFOO_CACHE_ENABLED: false
+          PROMPTFOO_DISABLE_CACHE: "1"
         run: npm run eval
 
       - name: Display scores summary
