@@ -1,0 +1,67 @@
+name: Run PRD Evaluation
+
+on:
+  workflow_dispatch:
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build verification
+        run: npm run build
+
+      - name: Run evaluation
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: npm run eval
+
+      - name: Display scores summary
+        if: always()
+        run: |
+          if [ -f dist/results/score-history.csv ]; then
+            echo "## 📊 PRD Evaluation Scores" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+
+            # Convert CSV to markdown table
+            awk -F',' '
+              NR==1 {
+                # Header row
+                printf "| "
+                for (i=1; i<=NF; i++) {
+                  gsub(/_/, " ", $i)
+                  printf "%s | ", $i
+                }
+                print ""
+                # Separator row
+                printf "|"
+                for (i=1; i<=NF; i++) printf " --- |"
+                print ""
+              }
+              NR>1 {
+                # Data rows
+                printf "| "
+                for (i=1; i<=NF; i++) {
+                  printf "%s | ", $i
+                }
+                print ""
+              }
+            ' dist/results/score-history.csv >> $GITHUB_STEP_SUMMARY
+
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "_Last updated: $(date -u +"%Y-%m-%d %H:%M:%S UTC")_" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "⚠️ Score history file not found" >> $GITHUB_STEP_SUMMARY
+          fi
