@@ -29,6 +29,7 @@ jobs:
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           PROMPTFOO_CACHE_ENABLED: false
           PROMPTFOO_DISABLE_CACHE: "1"
         run: npm run eval

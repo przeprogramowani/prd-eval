@@ -26,6 +26,7 @@ const CRITERIA = [
 const JUDGE_MAPPINGS: Record<string, string> = {
   "gpt-5": "gpt5",
   "claude-sonnet-4-5": "claude45",
+  "gemini-2.5-pro": "gemini25pro",
 };
 
 // ============================================================================

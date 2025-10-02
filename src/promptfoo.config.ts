@@ -85,7 +85,7 @@ const tests: TestCase[] = evaluationCases.map(
 
 const config: UnifiedConfig = {
   description:
-    "Evaluate vendor PRDs using GPT-5 and Claude Sonnet 4.5 as judges",
+    "Evaluate vendor PRDs using GPT-5, Claude Sonnet 4.5, and Gemini 2.5 Pro as judges",
   providers: [
     {
       id: "openai:gpt-5",
@@ -96,6 +96,12 @@ const config: UnifiedConfig = {
     },
     {
       id: "anthropic:messages:claude-sonnet-4-5-20250929",
+      config: {
+        temperature: 0,
+      },
+    },
+    {
+      id: "openrouter:google/gemini-2.5-pro",
       config: {
         temperature: 0,
       },
