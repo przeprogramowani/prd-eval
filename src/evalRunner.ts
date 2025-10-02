@@ -24,6 +24,7 @@ type JudgeJson = {
   scores: Record<string, {score: number}>;
   runId?: string;
   timestamp?: string;
+  judge?: string;
 };
 
 type CombinedRow = {
@@ -55,13 +56,32 @@ function ensureResultsDir() {
   }
 }
 
-function buildCsvHeader(models: string[]): string[] {
+function buildCsvHeader(
+  judgeModelPairs: Array<{judge: string; model: string}>
+): string[] {
   const base = ["run_id", "timestamp"];
-  const perModelColumns = models
+  const perModelColumns = judgeModelPairs
     .slice()
-    .sort()
-    .flatMap((model) => criteria.map((criterion) => `${model}_${criterion}`));
+    .sort((a, b) => {
+      const judgeCompare = a.judge.localeCompare(b.judge);
+      return judgeCompare !== 0 ? judgeCompare : a.model.localeCompare(b.model);
+    })
+    .flatMap(({judge, model}) =>
+      criteria.map((criterion) => `${judge}_${model}_${criterion}`)
+    );
   return base.concat(perModelColumns);
+}
+
+function normalizeJudgeName(providerId: string): string {
+  if (providerId.includes("gpt-5")) {
+    return "gpt5";
+  }
+  if (providerId.includes("claude-sonnet-4-5")) {
+    return "claude45";
+  }
+  // Fallback: extract the first recognizable token
+  const match = providerId.match(/[a-zA-Z0-9-]+/);
+  return match ? match[0].replace(/-/g, "") : "unknown";
 }
 
 function parseJudgeOutput(result: EvaluateResult): JudgeJson | null {
@@ -74,6 +94,9 @@ function parseJudgeOutput(result: EvaluateResult): JudgeJson | null {
     if (!parsed.model || !parsed.scores) {
       return null;
     }
+    // Extract provider/judge information
+    const providerId = (result.provider as any)?.id || "";
+    parsed.judge = normalizeJudgeName(providerId);
     return parsed;
   } catch {
     return null;
@@ -89,19 +112,23 @@ function combineRuns(
     timestamp: defaults.timestamp,
   };
   for (const entry of entries) {
+    const judge = entry.judge || "unknown";
     for (const criterion of criteria) {
       const score = entry.scores[criterion]?.score;
       if (typeof score === "number") {
-        row[`${entry.model}_${criterion}`] = score.toString();
+        row[`${judge}_${entry.model}_${criterion}`] = score.toString();
       }
     }
   }
   return row;
 }
 
-function writeCsvRow(row: CombinedRow, models: string[]) {
+function writeCsvRow(
+  row: CombinedRow,
+  judgeModelPairs: Array<{judge: string; model: string}>
+) {
   ensureResultsDir();
-  const header = buildCsvHeader(models);
+  const header = buildCsvHeader(judgeModelPairs);
   if (!existsSync(csvPath)) {
     writeFileSync(csvPath, `${header.join(",")}\n`);
   }
@@ -117,12 +144,18 @@ async function main() {
   if (!judgeEntries.length) {
     throw new Error("No JSON judge outputs detected");
   }
-  const models = Array.from(new Set(judgeEntries.map((entry) => entry.model)));
+  const judgeModelPairs = Array.from(
+    new Set(
+      judgeEntries.map((entry) =>
+        JSON.stringify({judge: entry.judge || "unknown", model: entry.model})
+      )
+    )
+  ).map((str) => JSON.parse(str) as {judge: string; model: string});
   const combined = combineRuns(judgeEntries, {
     runId: judgeEntries[0]?.runId ?? runId,
     timestamp: judgeEntries[0]?.timestamp ?? timestamp,
   });
-  writeCsvRow(combined, models);
+  writeCsvRow(combined, judgeModelPairs);
   console.log(`Logged scores to ${path.relative(repoRoot, csvPath)}`);
 }
 

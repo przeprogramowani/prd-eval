@@ -26,6 +26,7 @@ jobs:
       - name: Run evaluation
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           PROMPTFOO_CACHE_ENABLED: false
         run: npm run eval
 

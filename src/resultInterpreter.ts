@@ -59,24 +59,38 @@ function parseCSV(filePath: string): ScoreRow | null {
   };
 }
 
-function groupScoresByVendor(
+interface VendorJudgeScores {
+  [vendor: string]: {
+    [judge: string]: Record<string, string>;
+  };
+}
+
+function groupScoresByVendorAndJudge(
   scores: Record<string, string>
-): Record<string, Record<string, string>> {
-  const grouped: Record<string, Record<string, string>> = {};
+): VendorJudgeScores {
+  const grouped: VendorJudgeScores = {};
 
   for (const [key, value] of Object.entries(scores)) {
     const parts = key.split("_");
-    const vendor = parts[0];
-    const metric = parts.slice(1).join("_");
 
-    if (!vendor || !metric) {
-      continue;
-    }
+    // New format: judge_vendor_metric
+    if (parts.length >= 3) {
+      const judge = parts[0];
+      const vendor = parts[1];
+      const metric = parts.slice(2).join("_");
 
-    if (!grouped[vendor]) {
-      grouped[vendor] = {};
+      if (!judge || !vendor || !metric) {
+        continue;
+      }
+
+      if (!grouped[vendor]) {
+        grouped[vendor] = {};
+      }
+      if (!grouped[vendor][judge]) {
+        grouped[vendor][judge] = {};
+      }
+      grouped[vendor][judge][metric] = value;
     }
-    grouped[vendor][metric] = value;
   }
 
   return grouped;
@@ -96,8 +110,8 @@ function calculateAverage(scores: Record<string, string>): string {
 }
 
 function formatScoreSummary(row: ScoreRow): string {
-  const groupedScores = groupScoresByVendor(row.scores);
-  const vendors = Object.keys(groupedScores);
+  const groupedScores = groupScoresByVendorAndJudge(row.scores);
+  const vendors = Object.keys(groupedScores).sort();
 
   if (vendors.length === 0) {
     return "⚠️ No vendor scores found\n";
@@ -113,41 +127,78 @@ function formatScoreSummary(row: ScoreRow): string {
   output += `**Run ID:** \`${row.run_id}\`  \n`;
   output += `**Timestamp:** ${timestamp} UTC\n\n`;
 
-  // Create table
-  output += "| Vendor | ";
-  const firstVendor = vendors[0];
+  // Extract all unique judges across all vendors
+  const allJudges = new Set<string>();
+  for (const vendor of vendors) {
+    const vendorData = groupedScores[vendor];
+    if (vendorData) {
+      Object.keys(vendorData).forEach((judge) => allJudges.add(judge));
+    }
+  }
+  const judges = Array.from(allJudges).sort();
 
-  if (!firstVendor) {
-    return "⚠️ No vendors found\n";
+  // Get metrics from the first available judge/vendor combo
+  let metrics: string[] = [];
+  for (const vendor of vendors) {
+    const vendorData = groupedScores[vendor];
+    if (!vendorData) continue;
+
+    for (const judge of judges) {
+      const judgeScores = vendorData[judge];
+      if (judgeScores && Object.keys(judgeScores).length > 0) {
+        metrics = Object.keys(judgeScores);
+        break;
+      }
+    }
+    if (metrics.length > 0) break;
   }
 
-  const firstVendorScores = groupedScores[firstVendor];
-
-  if (!firstVendorScores) {
-    return "⚠️ Invalid vendor scores structure\n";
+  if (metrics.length === 0) {
+    return "⚠️ No metrics found\n";
   }
 
-  const metrics = Object.keys(firstVendorScores);
+  // Create table header
+  output += "| Vendor | Judge | ";
   metrics.forEach((metric) => {
     output += `${formatMetricName(metric)} | `;
   });
   output += "Average |\n";
 
-  output += "|--------|";
+  output += "|--------|-------|";
   metrics.forEach(() => {
     output += "--------|";
   });
   output += "--------|\n";
 
-  // Data rows
-  for (const [vendor, vendorScores] of Object.entries(groupedScores)) {
-    output += `| **${vendor}** | `;
-    metrics.forEach((metric) => {
-      const score = vendorScores[metric];
-      output += `${score ?? "N/A"} | `;
+  // Data rows - one row per vendor-judge combination
+  for (const vendor of vendors) {
+    const vendorData = groupedScores[vendor];
+    if (!vendorData) continue;
+
+    const judgesForVendor = Object.keys(vendorData).sort();
+    const rowSpan = judgesForVendor.length;
+
+    judgesForVendor.forEach((judge, judgeIdx) => {
+      const judgeScores = vendorData[judge];
+      if (!judgeScores) return;
+
+      // First row for this vendor includes the vendor name
+      if (judgeIdx === 0) {
+        output += `| **${vendor}** (${rowSpan}) | `;
+      } else {
+        output += "| | ";
+      }
+
+      output += `${judge} | `;
+
+      metrics.forEach((metric) => {
+        const score = judgeScores[metric];
+        output += `${score ?? "N/A"} | `;
+      });
+
+      const avg = calculateAverage(judgeScores);
+      output += `**${avg}** |\n`;
     });
-    const avg = calculateAverage(vendorScores);
-    output += `**${avg}** |\n`;
   }
 
   output += `\n_Last updated: ${new Date()
