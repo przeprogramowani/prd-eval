@@ -99,6 +99,7 @@ const config: UnifiedConfig = {
         model: "gpt-5",
         temperature: 0,
         response_format: {type: "json_object"},
+        // GPT-5 (o1 series) has reasoning enabled by default
       },
     },
     {
@@ -106,6 +107,8 @@ const config: UnifiedConfig = {
       config: {
         temperature: 0,
         response_format: {type: "json_object"},
+        // Claude Sonnet 4.5 supports extended thinking
+        extended_thinking: true,
       },
     },
     {
@@ -114,6 +117,7 @@ const config: UnifiedConfig = {
         temperature: 0,
         max_tokens: 4096,
         response_format: {type: "json_object"},
+        // Gemini 2.5 Pro has thinking mode (already active based on output)
       },
     },
   ],
