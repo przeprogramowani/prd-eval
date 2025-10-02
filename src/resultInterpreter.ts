@@ -109,6 +109,37 @@ function calculateAverage(scores: Record<string, string>): string {
   return (sum / values.length).toFixed(1);
 }
 
+function findBestModelPerJudge(
+  groupedScores: VendorJudgeScores
+): Record<string, {vendor: string; average: number}> {
+  const judgeAverages: Record<
+    string,
+    Array<{vendor: string; average: number}>
+  > = {};
+
+  // Collect all averages per judge-vendor combination
+  for (const [vendor, judgeData] of Object.entries(groupedScores)) {
+    for (const [judge, scores] of Object.entries(judgeData)) {
+      if (!judgeAverages[judge]) {
+        judgeAverages[judge] = [];
+      }
+      const avg = parseFloat(calculateAverage(scores));
+      judgeAverages[judge].push({vendor, average: avg});
+    }
+  }
+
+  // Find best vendor for each judge
+  const bestPerJudge: Record<string, {vendor: string; average: number}> = {};
+  for (const [judge, averages] of Object.entries(judgeAverages)) {
+    const best = averages.reduce((max, current) =>
+      current.average > max.average ? current : max
+    );
+    bestPerJudge[judge] = best;
+  }
+
+  return bestPerJudge;
+}
+
 function formatScoreSummary(row: ScoreRow): string {
   const groupedScores = groupScoresByVendorAndJudge(row.scores);
   const vendors = Object.keys(groupedScores).sort();
@@ -209,6 +240,26 @@ function formatScoreSummary(row: ScoreRow): string {
   return output;
 }
 
+function formatBestModelPerJudge(groupedScores: VendorJudgeScores): string {
+  const bestPerJudge = findBestModelPerJudge(groupedScores);
+  const judges = Object.keys(bestPerJudge).sort();
+
+  if (judges.length === 0) {
+    return "";
+  }
+
+  let output = "\n## 🏆 Best Model per Judge\n\n";
+
+  for (const judge of judges) {
+    const best = bestPerJudge[judge];
+    if (best) {
+      output += `**${judge}**: \`${best.vendor}\` (avg: ${best.average})\n`;
+    }
+  }
+
+  return output;
+}
+
 function main() {
   const resultsPath = path.join(
     __dirname,
@@ -223,7 +274,9 @@ function main() {
     process.exit(1);
   }
 
+  const groupedScores = groupScoresByVendorAndJudge(scoreRow.scores);
   const summary = formatScoreSummary(scoreRow);
+  const bestModelSummary = formatBestModelPerJudge(groupedScores);
 
   // Check if running in GitHub Actions
   const isGitHubActions = process.env.GITHUB_ACTIONS === "true";
@@ -231,11 +284,12 @@ function main() {
 
   if (isGitHubActions && stepSummaryPath) {
     // Write to GitHub Actions summary
-    fs.appendFileSync(stepSummaryPath, summary);
+    fs.appendFileSync(stepSummaryPath, summary + bestModelSummary);
     console.log("✅ Score summary written to GitHub Actions step summary");
   } else {
-    // Just log to console
+    // Log to console
     console.log(summary);
+    console.log(bestModelSummary);
   }
 }
 
