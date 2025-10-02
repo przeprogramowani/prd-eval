@@ -107,9 +107,10 @@ function calculateAverage(scores: Record<string, number>): string {
   return (sum / values.length).toFixed(1);
 }
 
-function findBestModelPerJudge(
-  groupedScores: VendorJudgeScores
-): Record<string, {vendor: string; average: number}> {
+function findTopModelsPerJudge(
+  groupedScores: VendorJudgeScores,
+  topN: number = 3
+): Record<string, Array<{vendor: string; average: number}>> {
   const judgeAverages: Record<
     string,
     Array<{vendor: string; average: number}>
@@ -126,16 +127,15 @@ function findBestModelPerJudge(
     }
   }
 
-  // Find best vendor for each judge
-  const bestPerJudge: Record<string, {vendor: string; average: number}> = {};
+  // Find top N vendors for each judge
+  const topPerJudge: Record<string, Array<{vendor: string; average: number}>> = {};
   for (const [judge, averages] of Object.entries(judgeAverages)) {
-    const best = averages.reduce((max, current) =>
-      current.average > max.average ? current : max
-    );
-    bestPerJudge[judge] = best;
+    // Sort by average descending and take top N
+    const sorted = averages.sort((a, b) => b.average - a.average);
+    topPerJudge[judge] = sorted.slice(0, topN);
   }
 
-  return bestPerJudge;
+  return topPerJudge;
 }
 
 function formatScoreSummary(
@@ -240,20 +240,24 @@ function formatScoreSummary(
   return output;
 }
 
-function formatBestModelPerJudge(groupedScores: VendorJudgeScores): string {
-  const bestPerJudge = findBestModelPerJudge(groupedScores);
-  const judges = Object.keys(bestPerJudge).sort();
+function formatTopModelsPerJudge(groupedScores: VendorJudgeScores): string {
+  const topPerJudge = findTopModelsPerJudge(groupedScores, 3);
+  const judges = Object.keys(topPerJudge).sort();
 
   if (judges.length === 0) {
     return "";
   }
 
-  let output = "\n## 🏆 Best Model per Judge\n\n";
+  let output = "\n## 🏆 Top 3 Models per Judge\n\n";
 
   for (const judge of judges) {
-    const best = bestPerJudge[judge];
-    if (best) {
-      output += `**${judge}**: \`${best.vendor}\` (avg: ${best.average})\n`;
+    const topModels = topPerJudge[judge];
+    if (topModels && topModels.length > 0) {
+      output += `**${judge}**:\n`;
+      topModels.forEach((model, index) => {
+        output += `  ${index + 1}. \`${model.vendor}\` (avg: ${model.average})\n`;
+      });
+      output += "\n";
     }
   }
 
@@ -269,7 +273,7 @@ function main(): void {
 
   const groupedScores = groupScoresByVendorAndJudge(liteResults);
   const summary = formatScoreSummary(liteResults, groupedScores);
-  const bestModelSummary = formatBestModelPerJudge(groupedScores);
+  const topModelsSummary = formatTopModelsPerJudge(groupedScores);
 
   // Check if running in GitHub Actions
   const isGitHubActions = process.env.GITHUB_ACTIONS === "true";
@@ -277,12 +281,12 @@ function main(): void {
 
   if (isGitHubActions && stepSummaryPath) {
     // Write to GitHub Actions summary
-    fs.appendFileSync(stepSummaryPath, summary + bestModelSummary);
+    fs.appendFileSync(stepSummaryPath, summary + topModelsSummary);
     console.log("✅ Score summary written to GitHub Actions step summary");
   } else {
     // Log to console
     console.log(summary);
-    console.log(bestModelSummary);
+    console.log(topModelsSummary);
   }
 }
 
