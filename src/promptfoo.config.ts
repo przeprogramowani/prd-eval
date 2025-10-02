@@ -99,6 +99,7 @@ const config: UnifiedConfig = {
   outputPath: path.join("dist", "results", "latest.json"),
   evaluateOptions: {
     cache: false,
+    maxConcurrency: 4,
   },
   commandLineOptions: {},
   // @ts-expect-error promptfoo types do not yet expose "tags" but CLI supports it
