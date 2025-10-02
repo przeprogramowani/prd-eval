@@ -97,7 +97,9 @@ const config: UnifiedConfig = {
   prompts: [promptTemplate],
   tests,
   outputPath: path.join("dist", "results", "latest.json"),
-  evaluateOptions: {},
+  evaluateOptions: {
+    cache: false,
+  },
   commandLineOptions: {},
   // @ts-expect-error promptfoo types do not yet expose "tags" but CLI supports it
   tags: ["prd", "rubric", "interview"],
