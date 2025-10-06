@@ -92,19 +92,11 @@ const JUDGE_MAPPINGS: Record<string, string> = buildJudgeMappings();
 
 type Criterion = (typeof CRITERIA)[number];
 
-interface ScoreEntry {
-  score: number;
-  rationale?: string;
-}
-
 interface JudgeOutput {
   model: string;
-  scores: Record<string, ScoreEntry>;
+  scores: Record<string, number>;
   judge?: string;
   file?: string;
-  totalScore?: number;
-  verdict?: string;
-  keyFollowUp?: string;
 }
 
 interface JudgeModelPair {
@@ -129,9 +121,6 @@ type ProviderIdentifier = string | {id: string; label?: string};
 interface LiteJudgeModelResult {
   file?: string;
   scores: Partial<Record<Criterion, number>>;
-  totalScore?: number;
-  verdict?: string;
-  keyFollowUp?: string;
 }
 
 interface ParseFailure {
@@ -391,7 +380,7 @@ function combineIntoRow(
   for (const entry of entries) {
     const judge = entry.judge ?? "unknown";
     for (const criterion of CRITERIA) {
-      const score = entry.scores[criterion]?.score;
+      const score = entry.scores[criterion];
       if (typeof score === "number") {
         row[`${judge}_${entry.model}_${criterion}`] = score.toString();
       }
@@ -439,9 +428,9 @@ function buildLiteResults(
 
     const scores: Partial<Record<Criterion, number>> = {};
     for (const criterion of CRITERIA) {
-      const scoreEntry = output.scores[criterion];
-      if (scoreEntry && typeof scoreEntry.score === "number") {
-        scores[criterion] = scoreEntry.score;
+      const score = output.scores[criterion];
+      if (typeof score === "number") {
+        scores[criterion] = score;
       }
     }
 
@@ -451,16 +440,6 @@ function buildLiteResults(
 
     if (output.file) {
       result.file = output.file;
-    }
-
-    if (typeof output.totalScore === "number") {
-      result.totalScore = output.totalScore;
-    }
-    if (output.verdict) {
-      result.verdict = output.verdict;
-    }
-    if (output.keyFollowUp) {
-      result.keyFollowUp = output.keyFollowUp;
     }
 
     judges[judge][model] = result;

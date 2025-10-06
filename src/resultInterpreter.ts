@@ -30,17 +30,9 @@ const CRITERIA_COUNT = CRITERIA.length;
 
 type Criterion = (typeof CRITERIA)[number];
 
-interface ScoreEntry {
-  score: number;
-  rationale?: string;
-}
-
 interface LiteJudgeModelResult {
   file?: string;
   scores: Partial<Record<Criterion, number>>;
-  totalScore?: number;
-  verdict?: string;
-  keyFollowUp?: string;
 }
 
 interface ParseFailure {
@@ -59,15 +51,11 @@ interface LiteResults {
 
 interface ModelDetails {
   metrics: Partial<Record<Criterion, number>>;
-  totalScore?: number;
-  verdict?: string;
-  keyFollowUp?: string;
 }
 
 interface TopModel {
   vendor: string;
   average: number;
-  totalScore?: number;
 }
 
 type ProviderIdentifier = string | Record<string, any>;
@@ -288,19 +276,6 @@ function groupScoresByVendorAndJudge(
 
       const details: ModelDetails = {metrics};
 
-      if (
-        typeof data?.totalScore === "number" &&
-        !Number.isNaN(data.totalScore)
-      ) {
-        details.totalScore = data.totalScore;
-      }
-      if (typeof data?.verdict === "string") {
-        details.verdict = data.verdict;
-      }
-      if (typeof data?.keyFollowUp === "string") {
-        details.keyFollowUp = data.keyFollowUp;
-      }
-
       grouped[vendor][judge] = details;
     }
   }
@@ -327,10 +302,6 @@ function calculateAverage(details: ModelDetails): string {
   );
 
   if (values.length === 0) {
-    const total = details.totalScore;
-    if (typeof total === "number" && !Number.isNaN(total)) {
-      return (total / CRITERIA_COUNT).toFixed(1);
-    }
     return "N/A";
   }
 
@@ -349,19 +320,13 @@ function findTopModelsPerJudge(
 
   for (const [vendor, judgeData] of Object.entries(groupedScores)) {
     for (const [judge, details] of Object.entries(judgeData)) {
-      const total = details.totalScore;
-      let average: number | null = null;
-
-      if (typeof total === "number" && !Number.isNaN(total)) {
-        average = total / CRITERIA_COUNT;
-      } else {
-        const avg = calculateAverage(details);
-        if (avg !== "N/A") {
-          average = parseFloat(avg);
-        }
+      const avg = calculateAverage(details);
+      if (avg === "N/A") {
+        continue;
       }
 
-      if (average === null || Number.isNaN(average)) {
+      const average = parseFloat(avg);
+      if (Number.isNaN(average)) {
         continue;
       }
 
@@ -369,16 +334,10 @@ function findTopModelsPerJudge(
         judgeAverages[judge] = [];
       }
 
-      const entry: TopModel = {
+      judgeAverages[judge].push({
         vendor,
         average,
-      };
-
-      if (typeof total === "number" && !Number.isNaN(total)) {
-        entry.totalScore = total;
-      }
-
-      judgeAverages[judge].push(entry);
+      });
     }
   }
 
@@ -484,13 +443,13 @@ function formatScoreSummary(
   formattedCriteria.forEach((name) => {
     output += `${name} | `;
   });
-  output += "Total | Verdict | Average |\n";
+  output += "Total | Average |\n";
 
   output += "|-------|-------|";
   formattedCriteria.forEach(() => {
     output += "-------|";
   });
-  output += "-------|---------|--------|\n";
+  output += "-------|--------|\n";
 
   // Build table rows
   for (const vendor of vendorOrder) {
@@ -503,7 +462,6 @@ function formatScoreSummary(
         "—",
         ...placeholderCells,
         "N/A",
-        "—",
         "N/A",
       ];
       output += `| ${rowCells.join(" | ")} |\n`;
@@ -549,16 +507,17 @@ function formatScoreSummary(
         );
       }
 
-      // Total score
+      // Total score (calculated from metrics)
+      const metricValues = CRITERIA.map(
+        (criterion) => details.metrics[criterion]
+      ).filter(
+        (value) => typeof value === "number" && !Number.isNaN(value)
+      ) as number[];
       const total =
-        typeof details.totalScore === "number" &&
-        !Number.isNaN(details.totalScore)
-          ? details.totalScore.toString()
+        metricValues.length > 0
+          ? metricValues.reduce((a, b) => a + b, 0).toString()
           : "N/A";
       rowCells.push(total);
-
-      // Verdict
-      rowCells.push(details.verdict ?? "—");
 
       // Average
       const average = calculateAverage(details);
@@ -567,11 +526,6 @@ function formatScoreSummary(
       output += `| ${rowCells.join(" | ")} |\n`;
     });
   }
-
-  output += `\n_Last updated: ${new Date()
-    .toISOString()
-    .replace("T", " ")
-    .slice(0, -5)} UTC_\n`;
 
   return output;
 }
@@ -603,13 +557,7 @@ function formatTopModelsPerJudge(
 
     topModels.forEach((model, index) => {
       const average = model.average.toFixed(1);
-      const totalSegment =
-        typeof model.totalScore === "number" && !Number.isNaN(model.totalScore)
-          ? ` | total: ${model.totalScore}`
-          : "";
-      output += `  ${index + 1}. \`${
-        model.vendor
-      }\` (avg: ${average}${totalSegment})\n`;
+      output += `  ${index + 1}. \`${model.vendor}\` (avg: ${average})\n`;
     });
     output += "\n";
   }
@@ -639,26 +587,14 @@ function formatModelAverages(
 
     const totals: number[] = [];
     for (const details of Object.values(vendorData)) {
-      let total: number | null = null;
+      const metricValues = CRITERIA.map(
+        (criterion) => details.metrics[criterion]
+      ).filter(
+        (value) => typeof value === "number" && !Number.isNaN(value)
+      ) as number[];
 
-      if (
-        typeof details.totalScore === "number" &&
-        !Number.isNaN(details.totalScore)
-      ) {
-        total = details.totalScore;
-      } else {
-        const metricValues = CRITERIA.map(
-          (criterion) => details.metrics[criterion]
-        ).filter(
-          (value) => typeof value === "number" && !Number.isNaN(value)
-        ) as number[];
-
-        if (metricValues.length > 0) {
-          total = metricValues.reduce((a, b) => a + b, 0);
-        }
-      }
-
-      if (total !== null) {
+      if (metricValues.length > 0) {
+        const total = metricValues.reduce((a, b) => a + b, 0);
         totals.push(total);
       }
     }
@@ -693,57 +629,6 @@ function formatModelAverages(
   return output;
 }
 
-/**
- * Formats the key follow-ups section.
- */
-function formatKeyFollowUps(
-  groupedScores: Record<string, Record<string, ModelDetails>>,
-  expectedModels: string[],
-  judgeOrder: string[],
-  judgeLabels: Record<string, string>
-): string {
-  const availableVendors = Object.keys(groupedScores);
-  const vendorOrder =
-    expectedModels.length > 0 ? expectedModels : availableVendors.sort();
-
-  const bulletLines: string[] = [];
-
-  for (const vendor of vendorOrder) {
-    const vendorData = groupedScores[vendor];
-    if (!vendorData) {
-      continue;
-    }
-
-    const orderedJudges = judgeOrder.length > 0 ? judgeOrder.slice() : [];
-    for (const judge of Object.keys(vendorData)) {
-      if (!orderedJudges.includes(judge)) {
-        orderedJudges.push(judge);
-      }
-    }
-
-    for (const judge of orderedJudges) {
-      const details = vendorData[judge];
-      if (!details || typeof details.keyFollowUp !== "string") {
-        continue;
-      }
-
-      const trimmed = details.keyFollowUp.replace(/\s+/g, " ").trim();
-      if (trimmed.length === 0) {
-        continue;
-      }
-
-      const judgeLabel = judgeLabels[judge] ?? judge;
-      bulletLines.push(`- **${vendor}** · ${judgeLabel}: ${trimmed}`);
-    }
-  }
-
-  if (bulletLines.length === 0) {
-    return "";
-  }
-
-  return `\n## 🔍 Key follow-ups\n\n${bulletLines.join("\n")}\n`;
-}
-
 // ============================================================================
 // Main Execution
 // ============================================================================
@@ -770,12 +655,6 @@ function main(): void {
   const modelAverages = formatModelAverages(groupedScores, expectedModels);
   const topModelsSummary = formatTopModelsPerJudge(groupedScores, judgeLabels);
   const failureSummary = formatFailureSummary(liteResults.failures ?? []);
-  const keyFollowUps = formatKeyFollowUps(
-    groupedScores,
-    expectedModels,
-    judgeOrder,
-    judgeLabels
-  );
 
   // Combine sections
   const sections = [
@@ -783,7 +662,6 @@ function main(): void {
     modelAverages,
     topModelsSummary,
     failureSummary,
-    keyFollowUps,
   ].filter((section) => section && section.trim().length > 0);
   const combinedSummary = sections.join("");
 
@@ -792,11 +670,9 @@ function main(): void {
   const stepSummaryPath = process.env.GITHUB_STEP_SUMMARY;
 
   if (isGitHubActions && stepSummaryPath) {
-    // Write to GitHub Actions summary
     appendFileSync(stepSummaryPath, combinedSummary);
-    console.log("✅ Score summary written to GitHub Actions step summary");
+    console.log("Score summary written to GitHub Actions step summary");
   } else {
-    // Log to console
     console.log(combinedSummary);
   }
 }
