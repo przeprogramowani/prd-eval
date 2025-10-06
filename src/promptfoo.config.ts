@@ -90,8 +90,7 @@ const tests: TestCase[] = evaluationCases.map(
 );
 
 const config: UnifiedConfig = {
-  description:
-    "Evaluate vendor PRDs using GPT-5, Claude Sonnet 4.5, and Gemini 2.5 Pro as judges",
+  description: "Evaluate vendor PRDs using LLMs as judges",
   providers: [
     {
       id: "openai:gpt-5",
@@ -102,13 +101,28 @@ const config: UnifiedConfig = {
         // GPT-5 (o1 series) has reasoning enabled by default
       },
     },
+    // {
+    //   id: "anthropic:messages:claude-sonnet-4-5-20250929",
+    //   config: {
+    //     temperature: 0,
+    //     response_format: {type: "json_object"},
+    //     // Claude Sonnet 4.5 supports extended thinking
+    //     extended_thinking: true,
+    //   },
+    // },
     {
-      id: "anthropic:messages:claude-sonnet-4-5-20250929",
+      id: "openrouter:z-ai/glm-4.6",
       config: {
         temperature: 0,
+        max_tokens: 4096,
+      },
+    },
+    {
+      id: "openrouter:deepseek/deepseek-v3.2-exp",
+      config: {
+        temperature: 0,
+        max_tokens: 4096,
         response_format: {type: "json_object"},
-        // Claude Sonnet 4.5 supports extended thinking
-        extended_thinking: true,
       },
     },
     {
@@ -126,7 +140,7 @@ const config: UnifiedConfig = {
   outputPath: path.join("dist", "results", "latest.json"),
   evaluateOptions: {
     cache: false,
-    maxConcurrency: 4,
+    maxConcurrency: 12,
   },
   commandLineOptions: {},
   // @ts-expect-error promptfoo types do not yet expose "tags" but CLI supports it

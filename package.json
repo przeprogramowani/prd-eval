@@ -4,8 +4,8 @@
   "main": "index.js",
   "scripts": {
     "build": "tsc --project tsconfig.json",
-    "eval": "rm -rf dist/results && npm run build && PROMPTFOO_CACHE_ENABLED=false node dist/evalRunner.js",
-    "display-scores": "npm run build && node dist/resultInterpreter.js"
+    "eval": "npm run build && PROMPTFOO_CACHE_ENABLED=false node dist/evalRunner.js",
+    "display": "npm run build && node dist/resultInterpreter.js"
   },
   "author": "",
   "license": "ISC",

@@ -36,4 +36,4 @@ jobs:
 
       - name: Display scores summary
         if: always()
-        run: npm run display-scores
+        run: npm run display

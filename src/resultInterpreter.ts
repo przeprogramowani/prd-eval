@@ -1,5 +1,10 @@
-import * as fs from "fs";
-import * as path from "path";
+import {existsSync, readFileSync, appendFileSync} from "fs";
+import path from "path";
+import config from "./promptfoo.config";
+
+// ============================================================================
+// Configuration
+// ============================================================================
 
 const RESULTS_PATH = path.join(
   __dirname,
@@ -17,7 +22,18 @@ const CRITERIA = [
   "measurability",
 ] as const;
 
+const CRITERIA_COUNT = CRITERIA.length;
+
+// ============================================================================
+// Types
+// ============================================================================
+
 type Criterion = (typeof CRITERIA)[number];
+
+interface ScoreEntry {
+  score: number;
+  rationale?: string;
+}
 
 interface LiteJudgeModelResult {
   file?: string;
@@ -27,70 +43,274 @@ interface LiteJudgeModelResult {
   keyFollowUp?: string;
 }
 
+interface ParseFailure {
+  judge: string;
+  model: string;
+  reason: string;
+  output?: string;
+}
+
 interface LiteResults {
   runId: string;
   timestamp: string;
   judges: Record<string, Record<string, LiteJudgeModelResult>>;
+  failures?: ParseFailure[];
 }
 
-interface VendorJudgeScores {
-  [vendor: string]: {
-    [judge: string]: Record<string, number>;
-  };
+interface ModelDetails {
+  metrics: Partial<Record<Criterion, number>>;
+  totalScore?: number;
+  verdict?: string;
+  keyFollowUp?: string;
 }
 
+interface TopModel {
+  vendor: string;
+  average: number;
+  totalScore?: number;
+}
+
+type ProviderIdentifier = string | Record<string, any>;
+
+// ============================================================================
+// Utility Functions
+// ============================================================================
+
+/**
+ * Extracts provider ID from promptfoo provider object or string.
+ */
+function extractProviderId(provider: ProviderIdentifier): string | null {
+  if (typeof provider === "string") {
+    return provider;
+  }
+  if (provider && typeof provider === "object" && "id" in provider) {
+    const candidate = provider.id;
+    return typeof candidate === "string" ? candidate : null;
+  }
+  return null;
+}
+
+/**
+ * Extracts provider label from promptfoo provider object.
+ */
+function extractProviderLabel(provider: ProviderIdentifier): string | null {
+  if (typeof provider === "string") {
+    return provider;
+  }
+  if (provider && typeof provider === "object" && "label" in provider) {
+    const candidate = provider.label;
+    if (typeof candidate === "string" && candidate.trim().length > 0) {
+      return candidate;
+    }
+  }
+  const providerId = extractProviderId(provider);
+  return providerId;
+}
+
+/**
+ * Converts a provider ID to a short, sanitized judge name.
+ * Uses the same logic as evalRunner.ts for consistency.
+ */
+function createJudgeNameFromProviderId(providerId: string): string {
+  // Strip provider prefix (e.g., "openai:", "openrouter:", "anthropic:messages:")
+  let name = providerId.replace(/^[^:]+:(?:messages:)?/, "");
+
+  // For OpenRouter format (org/model), take the model part
+  if (name.includes("/")) {
+    const parts = name.split("/");
+    name = parts[parts.length - 1] || name;
+  }
+
+  // Strip version suffixes like -20250929
+  name = name.replace(/-\d{8}$/, "");
+
+  // Remove dots, hyphens, and underscores
+  name = name.replace(/[.\-_]/g, "");
+
+  // Keep only alphanumeric characters
+  name = name.replace(/[^a-zA-Z0-9]/g, "");
+
+  return name.toLowerCase();
+}
+
+/**
+ * Gets the ordered list of models from config.
+ */
+function getConfiguredModelOrder(): string[] {
+  const configuredTests = config.tests;
+  if (!Array.isArray(configuredTests)) {
+    return [];
+  }
+
+  const seen = new Set<string>();
+  const orderedModels: string[] = [];
+
+  for (const testCase of configuredTests) {
+    if (!testCase || typeof testCase !== "object") {
+      continue;
+    }
+    const vars = (testCase as any).vars;
+    if (!vars || typeof vars !== "object") {
+      continue;
+    }
+    const candidate = vars.modelName;
+    if (typeof candidate === "string" && !seen.has(candidate)) {
+      seen.add(candidate);
+      orderedModels.push(candidate);
+    }
+  }
+
+  return orderedModels;
+}
+
+/**
+ * Gets the ordered list of judges from config.
+ */
+function getConfiguredJudgeOrder(): string[] {
+  const providers = config.providers;
+  if (!Array.isArray(providers)) {
+    return [];
+  }
+
+  const seen = new Set<string>();
+  const orderedJudges: string[] = [];
+
+  for (const provider of providers) {
+    const providerId = extractProviderId(provider);
+    if (!providerId) {
+      continue;
+    }
+    const alias = createJudgeNameFromProviderId(providerId);
+    if (!seen.has(alias)) {
+      seen.add(alias);
+      orderedJudges.push(alias);
+    }
+  }
+
+  return orderedJudges;
+}
+
+/**
+ * Builds a map of judge aliases to display labels.
+ */
+function buildJudgeDisplayMap(): Record<string, string> {
+  const providers = config.providers;
+  if (!Array.isArray(providers)) {
+    return {};
+  }
+
+  const labels: Record<string, string> = {};
+
+  for (const provider of providers) {
+    const providerId = extractProviderId(provider);
+    if (!providerId) {
+      continue;
+    }
+    const alias = createJudgeNameFromProviderId(providerId);
+    const label = extractProviderLabel(provider);
+    if (!label) {
+      continue;
+    }
+
+    if (labels[alias]) {
+      if (!labels[alias].includes(label)) {
+        labels[alias] = `${labels[alias]}, ${label}`;
+      }
+    } else {
+      labels[alias] = label;
+    }
+  }
+
+  return labels;
+}
+
+/**
+ * Parses the lite results JSON file.
+ */
 function parseLiteResults(filePath: string): LiteResults | null {
-  if (!fs.existsSync(filePath)) {
-    console.error("⚠️ Lite results file not found");
+  if (!existsSync(filePath)) {
+    console.error("⚠️  Lite results file not found");
     return null;
   }
 
   try {
-    const content = fs.readFileSync(filePath, "utf-8");
-    const parsed = JSON.parse(content) as LiteResults;
+    const content = readFileSync(filePath, "utf-8");
+    const parsed: unknown = JSON.parse(content);
 
     if (!parsed || typeof parsed !== "object") {
       throw new Error("Lite results JSON malformed");
     }
 
-    if (!parsed.runId || !parsed.timestamp || !parsed.judges) {
+    const lite = parsed as Partial<LiteResults>;
+    if (!lite.runId || !lite.timestamp || !lite.judges) {
       throw new Error("Lite results JSON missing required fields");
     }
 
-    return parsed;
+    return lite as LiteResults;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    console.error(`⚠️ Failed to read lite results: ${message}`);
+    console.error(`⚠️  Failed to read lite results: ${message}`);
     return null;
   }
 }
 
-function groupScoresByVendorAndJudge(lite: LiteResults): VendorJudgeScores {
-  const grouped: VendorJudgeScores = {};
+// ============================================================================
+// Formatting Functions
+// ============================================================================
+
+/**
+ * Groups scores by vendor (model) and judge.
+ */
+function groupScoresByVendorAndJudge(
+  lite: LiteResults
+): Record<string, Record<string, ModelDetails>> {
+  const grouped: Record<string, Record<string, ModelDetails>> = {};
 
   for (const [judge, models] of Object.entries(lite.judges)) {
-    if (!models) continue;
+    if (!models) {
+      continue;
+    }
 
     for (const [vendor, data] of Object.entries(models)) {
       if (!grouped[vendor]) {
         grouped[vendor] = {};
       }
-      if (!grouped[vendor][judge]) {
-        grouped[vendor][judge] = {};
-      }
 
-      const scores = data?.scores ?? {};
-      for (const [metric, value] of Object.entries(scores)) {
+      const metrics: Partial<Record<Criterion, number>> = {};
+      const scoreEntries = data?.scores ?? {};
+
+      for (const criterion of CRITERIA) {
+        const value = scoreEntries[criterion];
         if (typeof value === "number" && !Number.isNaN(value)) {
-          grouped[vendor][judge][metric] = value;
+          metrics[criterion] = value;
         }
       }
+
+      const details: ModelDetails = {metrics};
+
+      if (
+        typeof data?.totalScore === "number" &&
+        !Number.isNaN(data.totalScore)
+      ) {
+        details.totalScore = data.totalScore;
+      }
+      if (typeof data?.verdict === "string") {
+        details.verdict = data.verdict;
+      }
+      if (typeof data?.keyFollowUp === "string") {
+        details.keyFollowUp = data.keyFollowUp;
+      }
+
+      grouped[vendor][judge] = details;
     }
   }
 
   return grouped;
 }
 
+/**
+ * Formats criterion name for display.
+ */
 function formatMetricName(metric: string): string {
   return metric
     .replace(/([A-Z])/g, " $1")
@@ -98,54 +318,135 @@ function formatMetricName(metric: string): string {
     .trim();
 }
 
-function calculateAverage(scores: Record<string, number>): string {
-  const values = Object.values(scores);
+/**
+ * Calculates average score for a model judged by one judge.
+ */
+function calculateAverage(details: ModelDetails): string {
+  const values = Object.values(details.metrics).filter(
+    (value) => typeof value === "number" && !Number.isNaN(value)
+  );
+
   if (values.length === 0) {
+    const total = details.totalScore;
+    if (typeof total === "number" && !Number.isNaN(total)) {
+      return (total / CRITERIA_COUNT).toFixed(1);
+    }
     return "N/A";
   }
+
   const sum = values.reduce((a, b) => a + b, 0);
   return (sum / values.length).toFixed(1);
 }
 
+/**
+ * Finds top N models per judge based on average scores.
+ */
 function findTopModelsPerJudge(
-  groupedScores: VendorJudgeScores,
-  topN: number = 3
-): Record<string, Array<{vendor: string; average: number}>> {
-  const judgeAverages: Record<
-    string,
-    Array<{vendor: string; average: number}>
-  > = {};
+  groupedScores: Record<string, Record<string, ModelDetails>>,
+  topN = 3
+): Record<string, TopModel[]> {
+  const judgeAverages: Record<string, TopModel[]> = {};
 
-  // Collect all averages per judge-vendor combination
   for (const [vendor, judgeData] of Object.entries(groupedScores)) {
-    for (const [judge, scores] of Object.entries(judgeData)) {
+    for (const [judge, details] of Object.entries(judgeData)) {
+      const total = details.totalScore;
+      let average: number | null = null;
+
+      if (typeof total === "number" && !Number.isNaN(total)) {
+        average = total / CRITERIA_COUNT;
+      } else {
+        const avg = calculateAverage(details);
+        if (avg !== "N/A") {
+          average = parseFloat(avg);
+        }
+      }
+
+      if (average === null || Number.isNaN(average)) {
+        continue;
+      }
+
       if (!judgeAverages[judge]) {
         judgeAverages[judge] = [];
       }
-      const avg = parseFloat(calculateAverage(scores));
-      judgeAverages[judge].push({vendor, average: avg});
+
+      const entry: TopModel = {
+        vendor,
+        average,
+      };
+
+      if (typeof total === "number" && !Number.isNaN(total)) {
+        entry.totalScore = total;
+      }
+
+      judgeAverages[judge].push(entry);
     }
   }
 
-  // Find top N vendors for each judge
-  const topPerJudge: Record<string, Array<{vendor: string; average: number}>> = {};
+  const topPerJudge: Record<string, TopModel[]> = {};
+
   for (const [judge, averages] of Object.entries(judgeAverages)) {
-    // Sort by average descending and take top N
-    const sorted = averages.sort((a, b) => b.average - a.average);
-    topPerJudge[judge] = sorted.slice(0, topN);
+    const sorted = averages
+      .slice()
+      .sort((a, b) => b.average - a.average)
+      .slice(0, topN);
+    topPerJudge[judge] = sorted;
   }
 
   return topPerJudge;
 }
 
+/**
+ * Formats failure summary section.
+ */
+function formatFailureSummary(failures: ParseFailure[]): string {
+  if (failures.length === 0) {
+    return "";
+  }
+
+  let output = "\n## ⚠️  Evaluation Failures\n\n";
+
+  // Group by judge
+  const failuresByJudge = new Map<string, ParseFailure[]>();
+  for (const failure of failures) {
+    if (!failuresByJudge.has(failure.judge)) {
+      failuresByJudge.set(failure.judge, []);
+    }
+    failuresByJudge.get(failure.judge)!.push(failure);
+  }
+
+  for (const [judge, judgeFailures] of Array.from(
+    failuresByJudge.entries()
+  ).sort()) {
+    output += `**${judge}**:\n`;
+    for (const failure of judgeFailures) {
+      output += `- \`${failure.model}\`: ${failure.reason}\n`;
+      if (failure.output && failure.output.trim().length > 0) {
+        const preview = failure.output.slice(0, 100).replace(/\n/g, " ");
+        output += `  > ${preview}${failure.output.length > 100 ? "..." : ""}\n`;
+      }
+    }
+    output += "\n";
+  }
+
+  return output;
+}
+
+/**
+ * Formats the main score summary table.
+ */
 function formatScoreSummary(
   lite: LiteResults,
-  groupedScores: VendorJudgeScores
+  groupedScores: Record<string, Record<string, ModelDetails>>,
+  expectedModels: string[],
+  judgeOrder: string[],
+  judgeLabels: Record<string, string>
 ): string {
-  const vendors = Object.keys(groupedScores).sort();
+  const availableVendors = Object.keys(groupedScores);
+  const vendorOrder =
+    expectedModels.length > 0 ? expectedModels : availableVendors.sort();
 
-  if (vendors.length === 0) {
-    return "⚠️ No vendor scores found\n";
+  if (vendorOrder.length === 0) {
+    return "⚠️  No vendor scores found\n";
   }
 
   const timestamp = new Date(lite.timestamp).toLocaleString("en-US", {
@@ -158,77 +459,112 @@ function formatScoreSummary(
   output += `**Run ID:** \`${lite.runId}\`  \n`;
   output += `**Timestamp:** ${timestamp} UTC\n\n`;
 
-  // Extract all unique judges across all vendors
-  const allJudges = new Set<string>();
-  for (const vendor of vendors) {
+  // Determine judges present in data
+  const judgesInData = new Set<string>();
+  for (const vendor of availableVendors) {
     const vendorData = groupedScores[vendor];
-    if (vendorData) {
-      Object.keys(vendorData).forEach((judge) => allJudges.add(judge));
+    Object.keys(vendorData ?? {}).forEach((judge) => judgesInData.add(judge));
+  }
+
+  // Build ordered judge list
+  const orderedJudges = judgeOrder.length > 0 ? judgeOrder.slice() : [];
+  for (const judge of judgesInData) {
+    if (!orderedJudges.includes(judge)) {
+      orderedJudges.push(judge);
     }
   }
-  const judges = Array.from(allJudges).sort();
 
-  // Get metrics from the first available judge/vendor combo
-  let metrics: string[] = [];
-  for (const vendor of vendors) {
+  if (orderedJudges.length === 0) {
+    return "⚠️  No judges found in results\n";
+  }
+
+  // Build table header
+  const formattedCriteria = CRITERIA.map(formatMetricName);
+  output += "| Model | Judge | ";
+  formattedCriteria.forEach((name) => {
+    output += `${name} | `;
+  });
+  output += "Total | Verdict | Average |\n";
+
+  output += "|-------|-------|";
+  formattedCriteria.forEach(() => {
+    output += "-------|";
+  });
+  output += "-------|---------|--------|\n";
+
+  // Build table rows
+  for (const vendor of vendorOrder) {
     const vendorData = groupedScores[vendor];
-    if (!vendorData) continue;
 
-    for (const judge of judges) {
-      const judgeScores = vendorData[judge];
-      if (judgeScores && Object.keys(judgeScores).length > 0) {
-        metrics = Object.keys(judgeScores);
-        break;
+    if (!vendorData || Object.keys(vendorData).length === 0) {
+      const placeholderCells = CRITERIA.map(() => "N/A");
+      const rowCells = [
+        `**${vendor}** (0)`,
+        "—",
+        ...placeholderCells,
+        "N/A",
+        "—",
+        "N/A",
+      ];
+      output += `| ${rowCells.join(" | ")} |\n`;
+      continue;
+    }
+
+    // Get judges for this vendor
+    const judgesForVendor = orderedJudges.filter((judge) => vendorData[judge]);
+    for (const judge of Object.keys(vendorData)) {
+      if (!judgesForVendor.includes(judge)) {
+        judgesForVendor.push(judge);
       }
     }
-    if (metrics.length > 0) break;
-  }
 
-  if (metrics.length === 0) {
-    return "⚠️ No metrics found\n";
-  }
+    const rowCount = judgesForVendor.length;
 
-  // Create table header
-  output += "| Vendor | Judge | ";
-  metrics.forEach((metric) => {
-    output += `${formatMetricName(metric)} | `;
-  });
-  output += "Average |\n";
+    judgesForVendor.forEach((judge, idx) => {
+      const details = vendorData[judge];
+      if (!details) {
+        return;
+      }
 
-  output += "|--------|-------|";
-  metrics.forEach(() => {
-    output += "--------|";
-  });
-  output += "--------|\n";
+      const rowCells: string[] = [];
 
-  // Data rows - one row per vendor-judge combination
-  for (const vendor of vendors) {
-    const vendorData = groupedScores[vendor];
-    if (!vendorData) continue;
-
-    const judgesForVendor = Object.keys(vendorData).sort();
-    const rowSpan = judgesForVendor.length;
-
-    judgesForVendor.forEach((judge, judgeIdx) => {
-      const judgeScores = vendorData[judge];
-      if (!judgeScores) return;
-
-      // First row for this vendor includes the vendor name
-      if (judgeIdx === 0) {
-        output += `| **${vendor}** (${rowSpan}) | `;
+      // Model name (only on first row)
+      if (idx === 0) {
+        rowCells.push(`**${vendor}** (${rowCount})`);
       } else {
-        output += "| | ";
+        rowCells.push("");
       }
 
-      output += `${judge} | `;
+      // Judge name
+      const judgeLabel = judgeLabels[judge] ?? judge;
+      rowCells.push(judgeLabel);
 
-      metrics.forEach((metric) => {
-        const score = judgeScores[metric];
-        output += `${score !== undefined ? score : "N/A"} | `;
-      });
+      // Criterion scores
+      for (const criterion of CRITERIA) {
+        const value = details.metrics[criterion];
+        rowCells.push(
+          typeof value === "number" && !Number.isNaN(value)
+            ? value.toString()
+            : "N/A"
+        );
+      }
 
-      const avg = calculateAverage(judgeScores);
-      output += `**${avg}** |\n`;
+      // Total score
+      const total =
+        typeof details.totalScore === "number" &&
+        !Number.isNaN(details.totalScore)
+          ? details.totalScore.toString()
+          : "N/A";
+      rowCells.push(total);
+
+      // Verdict
+      rowCells.push(details.verdict ?? "—");
+
+      // Average
+      const average = calculateAverage(details);
+      rowCells.push(average === "N/A" ? "N/A" : `**${average}**`);
+
+      output += `| ${rowCells.join(" | ")} |\n`;
     });
   }
 
@@ -240,7 +576,13 @@ function formatScoreSummary(
   return output;
 }
 
-function formatTopModelsPerJudge(groupedScores: VendorJudgeScores): string {
+/**
+ * Formats the top models per judge section.
+ */
+function formatTopModelsPerJudge(
+  groupedScores: Record<string, Record<string, ModelDetails>>,
+  judgeLabels: Record<string, string>
+): string {
   const topPerJudge = findTopModelsPerJudge(groupedScores, 3);
   const judges = Object.keys(topPerJudge).sort();
 
@@ -252,28 +594,198 @@ function formatTopModelsPerJudge(groupedScores: VendorJudgeScores): string {
 
   for (const judge of judges) {
     const topModels = topPerJudge[judge];
-    if (topModels && topModels.length > 0) {
-      output += `**${judge}**:\n`;
-      topModels.forEach((model, index) => {
-        output += `  ${index + 1}. \`${model.vendor}\` (avg: ${model.average})\n`;
-      });
-      output += "\n";
+    if (!topModels || topModels.length === 0) {
+      continue;
     }
+
+    const judgeName = judgeLabels[judge] ?? judge;
+    output += `**${judgeName}**:\n`;
+
+    topModels.forEach((model, index) => {
+      const average = model.average.toFixed(1);
+      const totalSegment =
+        typeof model.totalScore === "number" && !Number.isNaN(model.totalScore)
+          ? ` | total: ${model.totalScore}`
+          : "";
+      output += `  ${index + 1}. \`${
+        model.vendor
+      }\` (avg: ${average}${totalSegment})\n`;
+    });
+    output += "\n";
   }
 
   return output;
 }
 
+/**
+ * Formats the overall model averages section.
+ */
+function formatModelAverages(
+  groupedScores: Record<string, Record<string, ModelDetails>>,
+  expectedModels: string[]
+): string {
+  const availableVendors = Object.keys(groupedScores);
+  const vendorOrder =
+    expectedModels.length > 0 ? expectedModels : availableVendors.sort();
+
+  const rows: string[] = [];
+
+  for (const vendor of vendorOrder) {
+    const vendorData = groupedScores[vendor];
+    if (!vendorData) {
+      rows.push(`| ${vendor} | 0 | N/A | N/A |`);
+      continue;
+    }
+
+    const totals: number[] = [];
+    for (const details of Object.values(vendorData)) {
+      let total: number | null = null;
+
+      if (
+        typeof details.totalScore === "number" &&
+        !Number.isNaN(details.totalScore)
+      ) {
+        total = details.totalScore;
+      } else {
+        const metricValues = CRITERIA.map(
+          (criterion) => details.metrics[criterion]
+        ).filter(
+          (value) => typeof value === "number" && !Number.isNaN(value)
+        ) as number[];
+
+        if (metricValues.length > 0) {
+          total = metricValues.reduce((a, b) => a + b, 0);
+        }
+      }
+
+      if (total !== null) {
+        totals.push(total);
+      }
+    }
+
+    if (totals.length === 0) {
+      rows.push(`| ${vendor} | 0 | N/A | N/A |`);
+      continue;
+    }
+
+    const sum = totals.reduce((a, b) => a + b, 0);
+    const avgTotal = sum / totals.length;
+    const avgScore = avgTotal / CRITERIA_COUNT;
+
+    rows.push(
+      `| ${vendor} | ${totals.length} | ${avgTotal.toFixed(
+        1
+      )} | ${avgScore.toFixed(1)} |`
+    );
+  }
+
+  const hasData = rows.some((row) => !row.includes("| 0 | N/A |"));
+  if (!hasData) {
+    return "";
+  }
+
+  let output = "\n## 📈 Overall Model Averages\n\n";
+  output += "| Model | Judges | Avg total | Avg score |\n";
+  output += "|-------|--------|-----------|-----------|\n";
+  output += rows.join("\n");
+  output += "\n";
+
+  return output;
+}
+
+/**
+ * Formats the key follow-ups section.
+ */
+function formatKeyFollowUps(
+  groupedScores: Record<string, Record<string, ModelDetails>>,
+  expectedModels: string[],
+  judgeOrder: string[],
+  judgeLabels: Record<string, string>
+): string {
+  const availableVendors = Object.keys(groupedScores);
+  const vendorOrder =
+    expectedModels.length > 0 ? expectedModels : availableVendors.sort();
+
+  const bulletLines: string[] = [];
+
+  for (const vendor of vendorOrder) {
+    const vendorData = groupedScores[vendor];
+    if (!vendorData) {
+      continue;
+    }
+
+    const orderedJudges = judgeOrder.length > 0 ? judgeOrder.slice() : [];
+    for (const judge of Object.keys(vendorData)) {
+      if (!orderedJudges.includes(judge)) {
+        orderedJudges.push(judge);
+      }
+    }
+
+    for (const judge of orderedJudges) {
+      const details = vendorData[judge];
+      if (!details || typeof details.keyFollowUp !== "string") {
+        continue;
+      }
+
+      const trimmed = details.keyFollowUp.replace(/\s+/g, " ").trim();
+      if (trimmed.length === 0) {
+        continue;
+      }
+
+      const judgeLabel = judgeLabels[judge] ?? judge;
+      bulletLines.push(`- **${vendor}** · ${judgeLabel}: ${trimmed}`);
+    }
+  }
+
+  if (bulletLines.length === 0) {
+    return "";
+  }
+
+  return `\n## 🔍 Key follow-ups\n\n${bulletLines.join("\n")}\n`;
+}
+
+// ============================================================================
+// Main Execution
+// ============================================================================
+
 function main(): void {
   const liteResults = parseLiteResults(RESULTS_PATH);
-
   if (!liteResults) {
     process.exit(1);
   }
 
+  const expectedModels = getConfiguredModelOrder();
+  const judgeOrder = getConfiguredJudgeOrder();
+  const judgeLabels = buildJudgeDisplayMap();
   const groupedScores = groupScoresByVendorAndJudge(liteResults);
-  const summary = formatScoreSummary(liteResults, groupedScores);
-  const topModelsSummary = formatTopModelsPerJudge(groupedScores);
+
+  // Build all sections
+  const summary = formatScoreSummary(
+    liteResults,
+    groupedScores,
+    expectedModels,
+    judgeOrder,
+    judgeLabels
+  );
+  const modelAverages = formatModelAverages(groupedScores, expectedModels);
+  const topModelsSummary = formatTopModelsPerJudge(groupedScores, judgeLabels);
+  const failureSummary = formatFailureSummary(liteResults.failures ?? []);
+  const keyFollowUps = formatKeyFollowUps(
+    groupedScores,
+    expectedModels,
+    judgeOrder,
+    judgeLabels
+  );
+
+  // Combine sections
+  const sections = [
+    summary,
+    modelAverages,
+    topModelsSummary,
+    failureSummary,
+    keyFollowUps,
+  ].filter((section) => section && section.trim().length > 0);
+  const combinedSummary = sections.join("");
 
   // Check if running in GitHub Actions
   const isGitHubActions = process.env.GITHUB_ACTIONS === "true";
@@ -281,12 +793,11 @@ function main(): void {
 
   if (isGitHubActions && stepSummaryPath) {
     // Write to GitHub Actions summary
-    fs.appendFileSync(stepSummaryPath, summary + topModelsSummary);
+    appendFileSync(stepSummaryPath, combinedSummary);
     console.log("✅ Score summary written to GitHub Actions step summary");
   } else {
     // Log to console
-    console.log(summary);
-    console.log(topModelsSummary);
+    console.log(combinedSummary);
   }
 }
 

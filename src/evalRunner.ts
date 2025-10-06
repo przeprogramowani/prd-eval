@@ -24,11 +24,67 @@ const CRITERIA = [
   "measurability",
 ] as const;
 
-const JUDGE_MAPPINGS: Record<string, string> = {
-  "gpt-5": "gpt5",
-  "claude-sonnet-4-5": "claude45",
-  "gemini-2.5-pro": "gemini25pro",
-};
+/**
+ * Builds judge name mappings from the providers in promptfoo config.
+ * Extracts provider IDs and creates normalized short names for CSV columns.
+ */
+function buildJudgeMappings(): Record<string, string> {
+  const mappings: Record<string, string> = {};
+
+  if (!config.providers || !Array.isArray(config.providers)) {
+    return mappings;
+  }
+
+  for (const provider of config.providers) {
+    let providerId: string | undefined;
+
+    if (typeof provider === "string") {
+      providerId = provider;
+    } else if (provider && typeof provider === "object" && "id" in provider) {
+      providerId = provider.id as string;
+    }
+
+    if (!providerId) continue;
+
+    // Create normalized judge name from provider ID
+    const judgeName = createJudgeNameFromProviderId(providerId);
+    mappings[providerId] = judgeName;
+  }
+
+  return mappings;
+}
+
+/**
+ * Converts a provider ID to a short, sanitized judge name.
+ * Examples:
+ * - "openai:gpt-5" → "gpt5"
+ * - "openrouter:z-ai/glm-4.6" → "glm46"
+ * - "openrouter:google/gemini-2.5-pro" → "gemini25pro"
+ * - "anthropic:messages:claude-sonnet-4-5-20250929" → "claudesonnet45"
+ */
+function createJudgeNameFromProviderId(providerId: string): string {
+  // Strip provider prefix (e.g., "openai:", "openrouter:", "anthropic:messages:")
+  let name = providerId.replace(/^[^:]+:(?:messages:)?/, "");
+
+  // For OpenRouter format (org/model), take the model part
+  if (name.includes("/")) {
+    const parts = name.split("/");
+    name = parts[parts.length - 1] || name;
+  }
+
+  // Strip version suffixes like -20250929
+  name = name.replace(/-\d{8}$/, "");
+
+  // Remove dots, hyphens, and underscores
+  name = name.replace(/[.\-_]/g, "");
+
+  // Keep only alphanumeric characters
+  name = name.replace(/[^a-zA-Z0-9]/g, "");
+
+  return name.toLowerCase();
+}
+
+const JUDGE_MAPPINGS: Record<string, string> = buildJudgeMappings();
 
 // ============================================================================
 // Types
@@ -78,10 +134,18 @@ interface LiteJudgeModelResult {
   keyFollowUp?: string;
 }
 
+interface ParseFailure {
+  judge: string;
+  model: string;
+  reason: string;
+  output?: string;
+}
+
 interface LiteResults {
   runId: string;
   timestamp: string;
   judges: Record<string, Record<string, LiteJudgeModelResult>>;
+  failures?: ParseFailure[];
 }
 
 // ============================================================================
@@ -122,19 +186,23 @@ function extractProviderId(provider: ProviderIdentifier): string {
 
 /**
  * Normalizes provider ID to a short judge name.
- * Uses configured mappings or falls back to sanitized first token.
+ * Uses dynamically built mappings from config or creates name on the fly.
  */
 function normalizeJudgeName(providerId: string): string {
-  // Check configured mappings
+  // Try exact match first
+  if (JUDGE_MAPPINGS[providerId]) {
+    return JUDGE_MAPPINGS[providerId];
+  }
+
+  // Try substring match (for flexibility with provider variations)
   for (const [key, value] of Object.entries(JUDGE_MAPPINGS)) {
-    if (providerId.includes(key)) {
+    if (providerId.includes(key) || key.includes(providerId)) {
       return value;
     }
   }
 
-  // Fallback: sanitize first recognizable token
-  const match = providerId.match(/[a-zA-Z0-9-]+/);
-  return match ? match[0].replace(/-/g, "") : "unknown";
+  // Fallback: create judge name on the fly using the same logic
+  return createJudgeNameFromProviderId(providerId);
 }
 
 /**
@@ -184,13 +252,59 @@ async function runEvaluation(): Promise<EvaluationResults> {
 
 /**
  * Parses a single evaluation result into structured judge output.
- * Returns null if parsing fails.
+ * Returns parsed output or null if parsing fails, along with failure details.
  */
-function parseJudgeOutput(result: EvaluateResult): JudgeOutput | null {
+function parseJudgeOutput(result: EvaluateResult): {
+  output: JudgeOutput | null;
+  failure?: ParseFailure;
+} {
+  const providerId = extractProviderId(result.provider as ProviderIdentifier);
+  const judge = normalizeJudgeName(providerId);
+
+  // Get model name from test case or vars
+  const model =
+    (result.testCase?.vars?.modelName as string) ||
+    (result.vars?.modelName as string) ||
+    "unknown";
+
+  // Check for API errors
+  if (result.response?.error) {
+    return {
+      output: null,
+      failure: {
+        judge,
+        model,
+        reason: "API error",
+        output: String(result.response.error).slice(0, 200),
+      },
+    };
+  }
+
   const raw = result.response?.output;
 
   if (typeof raw !== "string") {
-    return null;
+    return {
+      output: null,
+      failure: {
+        judge,
+        model,
+        reason: "Missing or non-string output",
+        output: String(raw),
+      },
+    };
+  }
+
+  // Check for empty or whitespace-only output
+  if (raw.trim().length === 0) {
+    return {
+      output: null,
+      failure: {
+        judge,
+        model,
+        reason: "Empty output",
+        output: raw,
+      },
+    };
   }
 
   try {
@@ -198,19 +312,34 @@ function parseJudgeOutput(result: EvaluateResult): JudgeOutput | null {
     const parsed: unknown = JSON.parse(cleanedJson);
 
     if (!isValidJudgeOutput(parsed)) {
-      return null;
+      return {
+        output: null,
+        failure: {
+          judge,
+          model,
+          reason: "Invalid schema (missing model or scores)",
+          output: cleanedJson.slice(0, 200),
+        },
+      };
     }
 
-    const providerId = extractProviderId(result.provider as ProviderIdentifier);
-    const judge = normalizeJudgeName(providerId);
-
     return {
-      ...parsed,
-      judge,
+      output: {
+        ...parsed,
+        judge,
+      },
     };
   } catch (error) {
-    // Silent failure - invalid JSON is expected for non-judge results
-    return null;
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    return {
+      output: null,
+      failure: {
+        judge,
+        model,
+        reason: `JSON parse error: ${errorMsg}`,
+        output: raw.slice(0, 200),
+      },
+    };
   }
 }
 
@@ -288,69 +417,150 @@ function writeCsvRow(row: CsvRow, pairs: JudgeModelPair[]): void {
   appendFileSync(CSV_PATH, `${orderedValues.join(",")}\n`);
 }
 
+/**
+ * Builds a lite JSON representation of judge results.
+ * Organizes by judge -> model -> scores, and includes failures.
+ */
 function buildLiteResults(
+  judgeOutputs: JudgeOutput[],
+  failures: ParseFailure[],
   runId: string,
-  timestamp: string,
-  entries: JudgeOutput[]
+  timestamp: string
 ): LiteResults {
-  const lite: LiteResults = {
-    runId,
-    timestamp,
-    judges: {},
-  };
+  const judges: Record<string, Record<string, LiteJudgeModelResult>> = {};
 
-  for (const entry of entries) {
-    const judge = entry.judge ?? "unknown";
+  for (const output of judgeOutputs) {
+    const judge = output.judge ?? "unknown";
+    const model = output.model;
 
-    if (!lite.judges[judge]) {
-      lite.judges[judge] = {};
+    if (!judges[judge]) {
+      judges[judge] = {};
     }
 
     const scores: Partial<Record<Criterion, number>> = {};
     for (const criterion of CRITERIA) {
-      const scoreValue = entry.scores[criterion]?.score;
-      if (typeof scoreValue === "number" && !Number.isNaN(scoreValue)) {
-        scores[criterion] = scoreValue;
+      const scoreEntry = output.scores[criterion];
+      if (scoreEntry && typeof scoreEntry.score === "number") {
+        scores[criterion] = scoreEntry.score;
       }
     }
 
-    const liteEntry: LiteJudgeModelResult = {
+    const result: LiteJudgeModelResult = {
       scores,
     };
 
-    if (entry.file !== undefined) {
-      liteEntry.file = entry.file;
+    if (output.file) {
+      result.file = output.file;
     }
 
-    if (
-      typeof entry.totalScore === "number" &&
-      !Number.isNaN(entry.totalScore)
-    ) {
-      liteEntry.totalScore = entry.totalScore;
+    if (typeof output.totalScore === "number") {
+      result.totalScore = output.totalScore;
+    }
+    if (output.verdict) {
+      result.verdict = output.verdict;
+    }
+    if (output.keyFollowUp) {
+      result.keyFollowUp = output.keyFollowUp;
     }
 
-    if (entry.verdict !== undefined) {
-      liteEntry.verdict = entry.verdict;
-    }
-
-    if (entry.keyFollowUp !== undefined) {
-      liteEntry.keyFollowUp = entry.keyFollowUp;
-    }
-
-    lite.judges[judge][entry.model] = liteEntry;
+    judges[judge][model] = result;
   }
 
-  return lite;
+  const liteResults: LiteResults = {
+    runId,
+    timestamp,
+    judges,
+  };
+
+  if (failures.length > 0) {
+    liteResults.failures = failures;
+  }
+
+  return liteResults;
 }
 
-function writeLiteResults(
-  runId: string,
-  timestamp: string,
-  entries: JudgeOutput[]
-): void {
+/**
+ * Writes lite JSON format to file for use by resultInterpreter.
+ */
+function writeLiteJson(liteResults: LiteResults): void {
   ensureResultsDir();
-  const liteResults = buildLiteResults(runId, timestamp, entries);
-  writeFileSync(LITE_JSON_PATH, `${JSON.stringify(liteResults, null, 2)}\n`);
+  const json = JSON.stringify(liteResults, null, 2);
+  writeFileSync(LITE_JSON_PATH, json);
+}
+
+/**
+ * Logs a detailed summary of evaluation results and failures.
+ */
+function logEvaluationSummary(
+  judgeOutputs: JudgeOutput[],
+  failures: ParseFailure[]
+): void {
+  console.log("\n" + "=".repeat(70));
+  console.log("📊 EVALUATION SUMMARY");
+  console.log("=".repeat(70));
+
+  // Overall stats
+  const totalResults = judgeOutputs.length + failures.length;
+  const successRate =
+    totalResults > 0
+      ? ((judgeOutputs.length / totalResults) * 100).toFixed(1)
+      : "0.0";
+
+  console.log(
+    `\n✅ Successful: ${judgeOutputs.length}/${totalResults} (${successRate}%)`
+  );
+  console.log(`❌ Failed: ${failures.length}/${totalResults}`);
+
+  // Success breakdown by judge
+  if (judgeOutputs.length > 0) {
+    console.log("\n📈 Successful evaluations by judge:");
+    const successByJudge = new Map<string, string[]>();
+
+    for (const output of judgeOutputs) {
+      const judge = output.judge ?? "unknown";
+      if (!successByJudge.has(judge)) {
+        successByJudge.set(judge, []);
+      }
+      successByJudge.get(judge)!.push(output.model);
+    }
+
+    for (const [judge, models] of Array.from(successByJudge.entries()).sort()) {
+      console.log(`  ${judge}: ${models.sort().join(", ")}`);
+    }
+  }
+
+  // Failure breakdown
+  if (failures.length > 0) {
+    console.log("\n⚠️  Failed evaluations:");
+
+    // Group by judge
+    const failuresByJudge = new Map<string, ParseFailure[]>();
+    for (const failure of failures) {
+      if (!failuresByJudge.has(failure.judge)) {
+        failuresByJudge.set(failure.judge, []);
+      }
+      failuresByJudge.get(failure.judge)!.push(failure);
+    }
+
+    for (const [judge, judgeFailures] of Array.from(
+      failuresByJudge.entries()
+    ).sort()) {
+      console.log(`\n  🔴 ${judge}:`);
+      for (const failure of judgeFailures) {
+        console.log(`     • ${failure.model}: ${failure.reason}`);
+        if (failure.output && failure.output.length > 0) {
+          const preview = failure.output.replace(/\n/g, "\\n");
+          console.log(
+            `       Output: ${preview}${
+              failure.output.length > 200 ? "..." : ""
+            }`
+          );
+        }
+      }
+    }
+  }
+
+  console.log("\n" + "=".repeat(70) + "\n");
 }
 
 // ============================================================================
@@ -360,36 +570,62 @@ function writeLiteResults(
 /**
  * Main orchestration function:
  * 1. Runs promptfoo evaluation
- * 2. Parses judge outputs
- * 3. Combines scores into CSV row
- * 4. Writes to score history file
+ * 2. Parses judge outputs and collects failures
+ * 3. Logs summary of successes and failures
+ * 4. Combines scores into CSV row
+ * 5. Writes to score history file
  */
 async function main(): Promise<void> {
   // Run evaluation
+  console.log("🔄 Running evaluation...\n");
   const {results, runId, timestamp} = await runEvaluation();
 
-  // Parse judge outputs
-  const judgeOutputs = results
-    .map(parseJudgeOutput)
-    .filter((entry): entry is JudgeOutput => entry !== null);
+  // Parse judge outputs and collect failures
+  const judgeOutputs: JudgeOutput[] = [];
+  const failures: ParseFailure[] = [];
+
+  for (const result of results) {
+    const {output, failure} = parseJudgeOutput(result);
+    if (output) {
+      judgeOutputs.push(output);
+    } else if (failure) {
+      failures.push(failure);
+    }
+  }
+
+  // Log summary
+  logEvaluationSummary(judgeOutputs, failures);
 
   if (judgeOutputs.length === 0) {
     throw new Error(
-      "No valid judge outputs detected. Check that models are returning valid JSON."
+      "No valid judge outputs detected. All evaluations failed. Check logs above for details."
     );
   }
 
   // Extract metadata and combine scores
   const judgeModelPairs = extractJudgeModelPairs(judgeOutputs);
   const csvRow = combineIntoRow(judgeOutputs, runId, timestamp);
+  const liteResults = buildLiteResults(
+    judgeOutputs,
+    failures,
+    runId,
+    timestamp
+  );
 
-  // Write to CSV
+  // Write outputs
   writeCsvRow(csvRow, judgeModelPairs);
-
-  // Write lite JSON summary without raw prompt inputs
-  writeLiteResults(runId, timestamp, judgeOutputs);
+  writeLiteJson(liteResults);
 
   console.log(`✅ Logged scores to ${path.relative(REPO_ROOT, CSV_PATH)}`);
+  console.log(
+    `✅ Wrote lite JSON to ${path.relative(REPO_ROOT, LITE_JSON_PATH)}`
+  );
+
+  if (failures.length > 0) {
+    console.log(
+      `⚠️  Warning: ${failures.length} evaluation(s) failed. Check summary above.\n`
+    );
+  }
 }
 
 // Run and handle errors
